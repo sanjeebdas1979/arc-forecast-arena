@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 const ALLOWED_INTERVALS = new Set([
   "1m",
   "5m",
   "15m",
   "1h",
 ]);
+
+const BINANCE_ENDPOINTS = [
+  "https://data-api.binance.vision",
+  "https://api.binance.com",
+  "https://api-gcp.binance.com",
+];
 
 type BinanceKline = [
   number,
@@ -22,10 +31,76 @@ type BinanceKline = [
   string
 ];
 
+async function fetchKlines(
+  interval: string
+): Promise<BinanceKline[]> {
+  let lastError: Error | null = null;
+
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 8000);
+
+    try {
+      const url = new URL(
+        "/api/v3/klines",
+        baseUrl
+      );
+
+      url.searchParams.set("symbol", "BTCUSDT");
+      url.searchParams.set("interval", interval);
+      url.searchParams.set("limit", "120");
+
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `Binance request failed with status ${response.status}.`
+        );
+      }
+
+      const result = await response.json();
+
+      if (!Array.isArray(result)) {
+        throw new Error(
+          "Binance returned an invalid candle response."
+        );
+      }
+
+      return result as BinanceKline[];
+    } catch (error) {
+      lastError =
+        error instanceof Error
+          ? error
+          : new Error(
+              "Unknown Binance request error."
+            );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw (
+    lastError ??
+    new Error(
+      "All Binance market-data endpoints failed."
+    )
+  );
+}
+
 export async function GET(request: NextRequest) {
   try {
     const interval =
-      request.nextUrl.searchParams.get("interval") ?? "1m";
+      request.nextUrl.searchParams.get("interval") ??
+      "1m";
 
     if (!ALLOWED_INTERVALS.has(interval)) {
       return NextResponse.json(
@@ -34,57 +109,64 @@ export async function GET(request: NextRequest) {
         },
         {
           status: 400,
+          headers: {
+            "Cache-Control": "no-store",
+          },
         }
       );
     }
 
-    const url = new URL(
-      "https://api.binance.com/api/v3/klines"
-    );
+    const result = await fetchKlines(interval);
 
-    url.searchParams.set("symbol", "BTCUSDT");
-    url.searchParams.set("interval", interval);
-    url.searchParams.set("limit", "120");
+    const candles = result
+      .map((kline) => ({
+        time: Math.floor(Number(kline[0]) / 1000),
+        open: Number(kline[1]),
+        high: Number(kline[2]),
+        low: Number(kline[3]),
+        close: Number(kline[4]),
+      }))
+      .filter((candle) =>
+        Object.values(candle).every((value) =>
+          Number.isFinite(value)
+        )
+      );
 
-    const response = await fetch(url, {
-      cache: "no-store",
-      headers: {
-        Accept: "application/json",
-      },
-    });
-
-    if (!response.ok) {
-      return NextResponse.json(
-        {
-          error: "Binance historical data is unavailable.",
-        },
-        {
-          status: 503,
-        }
+    if (candles.length === 0) {
+      throw new Error(
+        "No valid BTC candles were returned."
       );
     }
 
-    const result = (await response.json()) as BinanceKline[];
-
-    const candles = result.map((kline) => ({
-      time: Math.floor(kline[0] / 1000),
-      open: Number(kline[1]),
-      high: Number(kline[2]),
-      low: Number(kline[3]),
-      close: Number(kline[4]),
-    }));
-
-    return NextResponse.json({
-      interval,
-      candles,
-    });
-  } catch {
     return NextResponse.json(
       {
-        error: "Unable to load BTC candle history.",
+        interval,
+        candles,
       },
       {
-        status: 500,
+        status: 200,
+        headers: {
+          "Cache-Control":
+            "no-store, no-cache, must-revalidate",
+        },
+      }
+    );
+  } catch (error) {
+    console.error(
+      "BTC kline route error:",
+      error
+    );
+
+    return NextResponse.json(
+      {
+        error:
+          "Unable to load BTC candle history.",
+      },
+      {
+        status: 503,
+        headers: {
+          "Cache-Control": "no-store",
+        },
       }
     );
   }
