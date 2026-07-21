@@ -20,7 +20,7 @@ export default function Home() {
             </p>
 
             <h1 className="mt-1 text-3xl font-bold">
-              Arc Forecast Arena
+              Prederc Forecast Arena 
             </h1>
           </div>
 

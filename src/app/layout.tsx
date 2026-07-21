@@ -5,7 +5,7 @@ import "./globals.css";
 import Providers from "./providers";
 
 export const metadata: Metadata = {
-  title: "Arc Forecast Arena",
+  title: "Prederc Forecast Arena", 
   description: "Forecast markets on Arc Testnet using demo points.",
 };
 
