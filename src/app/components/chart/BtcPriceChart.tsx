@@ -17,28 +17,52 @@ import {
   type BtcTimeframe,
 } from "../providers/BtcPriceProvider";
 
+function formatTimeframeLabel(
+  timeframe: BtcTimeframe
+): string {
+  if (timeframe === "1m") {
+    return "1-minute candles";
+  }
+
+  if (timeframe === "5m") {
+    return "5-minute candles";
+  }
+
+  if (timeframe === "15m") {
+    return "15-minute candles";
+  }
+
+  return "1-hour candles";
+}
+
 export default function BtcPriceChart() {
   const {
-  candles,
-  data,
-  isLoading,
-  error,
-  isConnected,
-  timeframe,
-  setTimeframe,
-} = useBtcPrice();
+    candles,
+    data,
+    isLoading,
+    error,
+    isConnected,
+    timeframe,
+    setTimeframe,
+  } = useBtcPrice();
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  const containerRef =
+    useRef<HTMLDivElement | null>(null);
+
+  const chartRef =
+    useRef<IChartApi | null>(null);
 
   const candleSeriesRef =
-    useRef<ISeriesApi<"Candlestick"> | null>(null);
+    useRef<ISeriesApi<"Candlestick"> | null>(
+      null
+    );
 
-   const initializedDataRef = useRef(false);
-    const activeTimeframeRef =
-  useRef<BtcTimeframe | null>(null);
+  const initializedDataRef = useRef(false);
 
-  // Create the TradingView chart once.
+  const activeTimeframeRef =
+    useRef<BtcTimeframe>("1m");
+
+  // Chart একবার তৈরি করে।
   useEffect(() => {
     const container = containerRef.current;
 
@@ -72,7 +96,9 @@ export default function BtcPriceChart() {
       },
 
       rightPriceScale: {
-        borderColor: "rgba(148, 163, 184, 0.20)",
+        borderColor:
+          "rgba(148, 163, 184, 0.20)",
+
         scaleMargins: {
           top: 0.12,
           bottom: 0.12,
@@ -80,11 +106,13 @@ export default function BtcPriceChart() {
       },
 
       timeScale: {
-        borderColor: "rgba(148, 163, 184, 0.20)",
+        borderColor:
+          "rgba(148, 163, 184, 0.20)",
+
         timeVisible: true,
-        secondsVisible: true,
+        secondsVisible: false,
         rightOffset: 4,
-        barSpacing: 12,
+        barSpacing: 10,
       },
 
       handleScroll: true,
@@ -117,17 +145,19 @@ export default function BtcPriceChart() {
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
 
-    const resizeObserver = new ResizeObserver((entries) => {
-      const firstEntry = entries[0];
+    const resizeObserver = new ResizeObserver(
+      (entries) => {
+        const firstEntry = entries[0];
 
-      if (!firstEntry) {
-        return;
+        if (!firstEntry) {
+          return;
+        }
+
+        chart.applyOptions({
+          width: firstEntry.contentRect.width,
+        });
       }
-
-      chart.applyOptions({
-        width: firstEntry.contentRect.width,
-      });
-    });
+    );
 
     resizeObserver.observe(container);
 
@@ -138,70 +168,90 @@ export default function BtcPriceChart() {
       chartRef.current = null;
       candleSeriesRef.current = null;
       initializedDataRef.current = false;
-      activeTimeframeRef.current = null;
     };
   }, []);
 
-  // Load historical candles and safely apply live updates.
-useEffect(() => {
-  const series = candleSeriesRef.current;
+  // Timeframe change হলে সঙ্গে সঙ্গে পুরোনো chart clear করে।
+  function changeTimeframe(
+    nextTimeframe: BtcTimeframe
+  ): void {
+    if (nextTimeframe === timeframe) {
+      return;
+    }
 
-  if (!series || candles.length === 0) {
-    return;
+    const series = candleSeriesRef.current;
+
+    if (series) {
+      series.setData([]);
+    }
+
+    initializedDataRef.current = false;
+    activeTimeframeRef.current = nextTimeframe;
+
+    setTimeframe(nextTimeframe);
   }
 
-  const chartData: CandlestickData<UTCTimestamp>[] =
-    candles.map((candle) => ({
-      time: candle.time as UTCTimestamp,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-    }));
+  // নতুন timeframe-এর candles load করে এবং live candle update করে।
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    const chart = chartRef.current;
 
-  const timeframeChanged =
-    activeTimeframeRef.current !== timeframe;
+    if (!series || !chart) {
+      return;
+    }
 
-  if (
-    timeframeChanged ||
-    !initializedDataRef.current
-  ) {
-    series.setData(chartData);
+    // Provider candles clear করলে chart-ও clear থাকবে।
+    if (candles.length === 0) {
+      series.setData([]);
+      initializedDataRef.current = false;
+      return;
+    }
 
-    activeTimeframeRef.current = timeframe;
-    initializedDataRef.current = true;
+    const chartData: CandlestickData<UTCTimestamp>[] =
+      candles.map((candle) => ({
+        time: candle.time as UTCTimestamp,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      }));
 
-    chartRef.current?.timeScale().fitContent();
-    return;
-  }
+    const needsCompleteReload =
+      !initializedDataRef.current ||
+      activeTimeframeRef.current !== timeframe;
 
-  const latestCandle = chartData.at(-1);
+    if (needsCompleteReload) {
+      series.setData(chartData);
 
-  if (!latestCandle) {
-    return;
-  }
+      activeTimeframeRef.current = timeframe;
+      initializedDataRef.current = true;
 
-  try {
-    series.update(latestCandle);
-    chartRef.current?.timeScale().scrollToRealTime();
-  } catch {
-    // Historical data may finish loading after a timeframe switch.
-    // Resetting the complete series keeps candle times ordered.
-    series.setData(chartData);
-    chartRef.current?.timeScale().fitContent();
-  }
-}, [candles, timeframe]);
-    
-      
-      
-    
+      chart.timeScale().fitContent();
+      return;
+    }
 
-    
-  
+    const latestCandle =
+      chartData[chartData.length - 1];
+
+    if (!latestCandle) {
+      return;
+    }
+
+    try {
+      series.update(latestCandle);
+      chart.timeScale().scrollToRealTime();
+    } catch {
+      series.setData(chartData);
+      chart.timeScale().fitContent();
+    }
+  }, [candles, timeframe]);
+
+  const isChangingTimeframe =
+    isLoading && candles.length === 0;
 
   return (
     <section className="rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-sm text-white/60">
             Live BTC Movement
@@ -212,53 +262,53 @@ useEffect(() => {
           </h2>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {(
+            [
+              "1m",
+              "5m",
+              "15m",
+              "1h",
+            ] as BtcTimeframe[]
+          ).map((selectedTimeframe) => (
+            <button
+              key={selectedTimeframe}
+              type="button"
+              onClick={() =>
+                changeTimeframe(
+                  selectedTimeframe
+                )
+              }
+              disabled={
+                isChangingTimeframe &&
+                timeframe === selectedTimeframe
+              }
+              className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${
+                timeframe === selectedTimeframe
+                  ? "bg-orange-500 text-white"
+                  : "bg-white/5 text-white/60 hover:bg-white/10 hover:text-white"
+              } disabled:cursor-wait disabled:opacity-60`}
+            >
+              {selectedTimeframe}
+            </button>
+          ))}
 
-  {(["1m", "5m", "15m", "1h"] as BtcTimeframe[]).map(
-    (tf) => (
-      <button
-        key={tf}
-        onClick={() => setTimeframe(tf)}
-        className={`rounded-lg px-3 py-1 text-xs transition ${
-          timeframe === tf
-            ? "bg-orange-500 text-white"
-            : "bg-white/5 text-white/60 hover:bg-white/10"
-        }`}
-      >
-        {tf}
-      </button>
-    )
-  )}
+          <div className="ml-2 flex items-center gap-2">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                isConnected
+                  ? "bg-emerald-400"
+                  : "bg-amber-400"
+              }`}
+            />
 
-  <div className="ml-2 flex items-center gap-2">
-
-    <span
-      className={`h-2 w-2 rounded-full ${
-        isConnected
-          ? "bg-emerald-400"
-          : "bg-amber-400"
-      }`}
-    />
-
-    <span className="text-xs text-white/60">
-      Live
-    </span>
-
-  </div>
-
-</div>
-          
-            
-              
-                
-              
-            
-          
-
-          
-          
-          
-      
+            <span className="text-xs text-white/60">
+              {isConnected
+                ? "Live"
+                : "Connecting"}
+            </span>
+          </div>
+        </div>
       </div>
 
       <div className="relative mt-6 overflow-hidden rounded-2xl border border-white/10 bg-[#11151b]">
@@ -267,39 +317,49 @@ useEffect(() => {
           className="h-[360px] w-full"
         />
 
-        {isLoading && candles.length === 0 ? (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#11151b]/80">
-            <p className="text-sm text-white/60">
-              Connecting to live BTC market data...
+        {isChangingTimeframe && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-[#11151b]/90 backdrop-blur-sm">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/10 border-t-orange-500" />
+
+            <p className="mt-4 text-sm font-semibold text-white">
+              Loading {timeframe} chart
+            </p>
+
+            <p className="mt-1 text-xs text-white/50">
+              Fetching recent BTC candles...
             </p>
           </div>
-        ) : null}
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-white/50">
-          Binance BTC/USDT • 1-second candles
+          Binance BTC/USDT •{" "}
+          {formatTimeframeLabel(timeframe)}
         </p>
 
-        {data ? (
+        {data && (
           <p className="text-xs text-white/60">
             Live price:{" "}
             <span className="font-medium text-white">
               $
-              {data.price.toLocaleString(undefined, {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}
+              {data.price.toLocaleString(
+                undefined,
+                {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                }
+              )}
             </span>
           </p>
-        ) : null}
+        )}
       </div>
 
-      {error ? (
+      {error && (
         <p className="mt-3 text-xs text-amber-300">
           {error}
         </p>
-      ) : null}
+      )}
     </section>
   );
 }

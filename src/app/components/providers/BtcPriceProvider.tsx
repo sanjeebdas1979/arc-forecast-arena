@@ -64,85 +64,192 @@ const BtcPriceContext =
 const MAX_CANDLES = 120;
 const RECONNECT_DELAY = 3000;
 
+function mergeCandle(
+  currentCandles: BtcCandle[],
+  incomingCandle: BtcCandle
+): BtcCandle[] {
+  const existingIndex = currentCandles.findIndex(
+    (candle) => candle.time === incomingCandle.time
+  );
+
+  if (existingIndex >= 0) {
+    const updatedCandles = [...currentCandles];
+
+    updatedCandles[existingIndex] = incomingCandle;
+
+    return updatedCandles
+      .sort((first, second) => first.time - second.time)
+      .slice(-MAX_CANDLES);
+  }
+
+  return [...currentCandles, incomingCandle]
+    .sort((first, second) => first.time - second.time)
+    .slice(-MAX_CANDLES);
+}
+
 export function BtcPriceProvider({
   children,
 }: {
   children: ReactNode;
 }) {
-  const [data, setData] = useState<BtcPriceData | null>(null);
-  const [candles, setCandles] = useState<BtcCandle[]>([]);
+  const [data, setData] = useState<BtcPriceData | null>(
+    null
+  );
+
+  const [candles, setCandles] = useState<BtcCandle[]>(
+    []
+  );
+
   const [timeframe, setTimeframe] =
     useState<BtcTimeframe>("1m");
+
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] =
+    useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
+
   const reconnectTimerRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null);
+    useRef<ReturnType<typeof setTimeout> | null>(
+      null
+    );
+
+  const requestIdRef = useRef(0);
+  const historyReadyRef = useRef(false);
+  const pendingLiveCandleRef =
+    useRef<BtcCandle | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
+    const requestId = requestIdRef.current + 1;
 
-    const loadHistory = async () => {
+    requestIdRef.current = requestId;
+    historyReadyRef.current = false;
+    pendingLiveCandleRef.current = null;
+
+    setCandles([]);
+    setIsLoading(true);
+    setError("");
+
+    const controller = new AbortController();
+
+    async function loadHistory(): Promise<void> {
       try {
-        setIsLoading(true);
-        setError("");
-
         const response = await fetch(
           `/api/btc-klines?interval=${timeframe}`,
           {
             cache: "no-store",
+            signal: controller.signal,
           }
         );
 
         if (!response.ok) {
-          throw new Error("Historical BTC data request failed.");
+          throw new Error(
+            "Historical BTC data request failed."
+          );
         }
 
         const result =
           (await response.json()) as HistoryResponse;
 
-        if (!cancelled) {
-          setCandles(result.candles.slice(-MAX_CANDLES));
+        if (
+          requestIdRef.current !== requestId ||
+          result.interval !== timeframe
+        ) {
+          return;
         }
-      } catch {
-        if (!cancelled) {
-          setError("BTC candle history is temporarily unavailable.");
+
+        let historicalCandles =
+          result.candles.slice(-MAX_CANDLES);
+
+        const pendingLiveCandle =
+          pendingLiveCandleRef.current;
+
+        if (pendingLiveCandle) {
+          historicalCandles = mergeCandle(
+            historicalCandles,
+            pendingLiveCandle
+          );
         }
+
+        setCandles(historicalCandles);
+        historyReadyRef.current = true;
+      } catch (historyError) {
+        if (
+          controller.signal.aborted ||
+          requestIdRef.current !== requestId
+        ) {
+          return;
+        }
+
+        console.error(
+          "Could not load BTC candle history:",
+          historyError
+        );
+
+        setError(
+          "BTC candle history is temporarily unavailable."
+        );
+
+        const pendingLiveCandle =
+          pendingLiveCandleRef.current;
+
+        if (pendingLiveCandle) {
+          setCandles([pendingLiveCandle]);
+        }
+
+        historyReadyRef.current = true;
       } finally {
-        if (!cancelled) {
+        if (
+          requestIdRef.current === requestId &&
+          !controller.signal.aborted
+        ) {
           setIsLoading(false);
         }
       }
-    };
+    }
 
     loadHistory();
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [timeframe]);
 
   useEffect(() => {
     let shouldReconnect = true;
 
-    const connect = () => {
-      setError("");
+    function connect(): void {
+      if (!shouldReconnect) {
+        return;
+      }
+
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
 
       const streamUrl =
         `wss://stream.binance.com:9443/stream?streams=` +
         `btcusdt@kline_${timeframe}/btcusdt@miniTicker`;
 
       const socket = new WebSocket(streamUrl);
+
       socketRef.current = socket;
 
       socket.onopen = () => {
+        if (!shouldReconnect) {
+          return;
+        }
+
         setIsConnected(true);
-        setError("");
       };
 
       socket.onmessage = (event) => {
+        if (!shouldReconnect) {
+          return;
+        }
+
         try {
           const message = JSON.parse(
             event.data
@@ -155,7 +262,7 @@ export function BtcPriceProvider({
           ) {
             const kline = message.data.k;
 
-            const candle: BtcCandle = {
+            const liveCandle: BtcCandle = {
               time: Math.floor(kline.t / 1000),
               open: Number(kline.o),
               high: Number(kline.h),
@@ -163,44 +270,50 @@ export function BtcPriceProvider({
               close: Number(kline.c),
             };
 
-            if (
-              Object.values(candle).some(
-                (value) => !Number.isFinite(value)
-              )
-            ) {
+            const isValidCandle = Object.values(
+              liveCandle
+            ).every((value) =>
+              Number.isFinite(value)
+            );
+
+            if (!isValidCandle) {
               return;
             }
 
-            setCandles((currentCandles) => {
-              const lastCandle =
-                currentCandles[currentCandles.length - 1];
-
-              if (lastCandle?.time === candle.time) {
-                return [
-                  ...currentCandles.slice(0, -1),
-                  candle,
-                ];
-              }
-
-              return [...currentCandles, candle].slice(
-                -MAX_CANDLES
+            if (!historyReadyRef.current) {
+              pendingLiveCandleRef.current =
+                liveCandle;
+            } else {
+              setCandles((currentCandles) =>
+                mergeCandle(
+                  currentCandles,
+                  liveCandle
+                )
               );
-            });
+            }
 
             setData((currentData) => ({
-              price: candle.close,
-              change24h: currentData?.change24h ?? 0,
-              updatedAt: message.data?.E ?? Date.now(),
+              price: liveCandle.close,
+              change24h:
+                currentData?.change24h ?? 0,
+              updatedAt:
+                message.data?.E ?? Date.now(),
             }));
           }
 
           if (
-            message.stream === "btcusdt@miniTicker" &&
+            message.stream ===
+              "btcusdt@miniTicker" &&
             message.data?.c &&
             message.data?.o
           ) {
-            const closePrice = Number(message.data.c);
-            const openPrice = Number(message.data.o);
+            const closePrice = Number(
+              message.data.c
+            );
+
+            const openPrice = Number(
+              message.data.o
+            );
 
             if (
               !Number.isFinite(closePrice) ||
@@ -211,34 +324,52 @@ export function BtcPriceProvider({
             }
 
             const change24h =
-              ((closePrice - openPrice) / openPrice) * 100;
+              ((closePrice - openPrice) /
+                openPrice) *
+              100;
 
             setData({
               price: closePrice,
               change24h,
-              updatedAt: message.data?.E ?? Date.now(),
+              updatedAt:
+                message.data?.E ?? Date.now(),
             });
           }
-        } catch {
-          setError("BTC live data could not be processed.");
+        } catch (messageError) {
+          console.error(
+            "Could not process BTC live data:",
+            messageError
+          );
+
+          setError(
+            "BTC live data could not be processed."
+          );
         }
       };
 
       socket.onerror = () => {
-        setError("BTC live connection is temporarily unavailable.");
+        if (!shouldReconnect) {
+          return;
+        }
+
+        setError(
+          "BTC live connection is temporarily unavailable."
+        );
       };
 
       socket.onclose = () => {
         setIsConnected(false);
 
-        if (shouldReconnect) {
-          reconnectTimerRef.current = setTimeout(
-            connect,
-            RECONNECT_DELAY
-          );
+        if (!shouldReconnect) {
+          return;
         }
+
+        reconnectTimerRef.current = setTimeout(
+          connect,
+          RECONNECT_DELAY
+        );
       };
-    };
+    }
 
     connect();
 
@@ -246,17 +377,28 @@ export function BtcPriceProvider({
       shouldReconnect = false;
 
       if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
+        clearTimeout(
+          reconnectTimerRef.current
+        );
+
+        reconnectTimerRef.current = null;
       }
 
-      socketRef.current?.close();
-      socketRef.current = null;
+      if (socketRef.current) {
+        socketRef.current.onclose = null;
+        socketRef.current.close();
+        socketRef.current = null;
+      }
+
+      setIsConnected(false);
     };
   }, [timeframe]);
 
-  const refreshPrice = () => {
-    socketRef.current?.close();
-  };
+  function refreshPrice(): void {
+    if (socketRef.current) {
+      socketRef.current.close();
+    }
+  }
 
   const value = useMemo(
     () => ({
